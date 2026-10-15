@@ -1,0 +1,68 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Built APKs for on-device testing. Build artifacts, not source — and
+# each one has a hub address baked in that is only right for one machine.
+/output-apk/
+
+# Private keys never belong in app resources. The hub certificate
+# (hub_ca.pem) is public and is committed; its key is not.
+app/src/main/res/raw/*-key.pem
+app/src/main/res/raw/*.key
+
+# TLS keypairs per deployment. Certificates are public; the keys are not,
+# and neither belongs in the repo — regenerate with server/make-cert.py.
+/deploy/
+
+# MediaMTX binary, downloaded on demand by scripts/run-local-hub.ps1.
+# A ~30 MB third-party release artifact, not source: it is fetched per machine
+# and pinned to whatever the latest release is at download time.
+scripts/.tools/
+
+# Local hub data — camera list, registration codes, recorded runs, and the
+# generated mediamtx.yml. Operator data and machine-specific addresses, the
+# same reason server/cameras.json is ignored.
+server/local-data/
+
+# Published APKs for phone self-update (server/publish-apk.py writes here).
+# Build output, not source — the same reason output-apk/ is ignored.
+server/apk/
+
+# Release signing key. NEVER commit this — a keystore in git is a keystore in
+# every clone, and anyone holding it can sign an APK that phones will accept as
+# an update. Back it up outside the repo (a password manager or an offline
+# copy); losing it means no future build can update any phone already in the
+# field. See docs/september-15/app-auto-update.md.
+keystore/
+*.jks
+*.keystore
+
+# The stray .git directory inside the vendored libusb-cmake checkout.
+#
+# That directory is why CI could not build: git recorded libusb-cmake as a
+# gitlink (mode 160000) rather than as files, but no .gitmodules ever existed
+# to say where to clone it from. A fresh checkout therefore got an empty
+# directory and CMake failed with "does not contain a CMakeLists.txt file".
+# The sources are now committed like every other vendored dependency
+# (libuvc, libjpeg-turbo, srt); this keeps the upstream history out of ours.
+app/src/main/cpp/libusb-cmake/.git/
+
+# Password keystore rilis
+keystore.properties
+
+# Hasil build
+/app/build
+*.apk
