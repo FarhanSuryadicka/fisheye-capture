@@ -19,6 +19,12 @@ object UvcNative {
     /** Byte MJPEG asli satu frame, atau null bila timeout / frame rusak. */
     external fun grabFrame(timeoutMs: Int): ByteArray?
     external fun getLogText(): String
+
+    /** Kontrol gambar UVC; lihat [CameraControls.read]. Aman dipanggil saat stream jalan. */
+    external fun getControls(): IntArray
+    external fun setControl(id: Int, value: Int): Boolean
+    external fun setAutoExposure(on: Boolean): Boolean
+    external fun setAutoWhiteBalance(on: Boolean): Boolean
 }
 
 data class CaptureMode(val width: Int, val height: Int, val fps: Int) {

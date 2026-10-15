@@ -59,6 +59,10 @@ class MainActivity : Activity() {
     private lateinit var photoButton: Button
     private lateinit var recordButton: Button
     private lateinit var paramButton: Button
+    private lateinit var adjustButton: Button
+    private var panel: ControlsPanel? = null
+    /** Status auto exposure / white balance kamera, untuk ditampilkan di info. */
+    private var autoText = ""
     private lateinit var startButton: Button
 
     private lateinit var calibrations: List<CameraCalibration>
@@ -102,6 +106,8 @@ class MainActivity : Activity() {
         photoButton = findViewById(R.id.photo)
         recordButton = findViewById(R.id.record)
         paramButton = findViewById(R.id.parameter)
+        adjustButton = findViewById(R.id.adjust)
+        adjustButton.setOnClickListener { panel?.show() }
         startButton = findViewById(R.id.start)
         setupParameterPicker()
         startButton.setOnClickListener { if (started) stopCamera() else startCamera() }
@@ -259,6 +265,15 @@ class MainActivity : Activity() {
             val modes = UvcNative.getSupportedModes().toModes()
             photoMode = calibration.chooseCaptureMode(modes)
             videoMode = calibration.chooseVideoMode(modes)
+            // Terapkan pengaturan gambar tersimpan untuk parameter ini, lalu baca status auto.
+            val store = ControlStore(getSharedPreferences(PREFS, MODE_PRIVATE), calibration.name)
+            store.applyTo(CameraControls.read())
+            val controls = CameraControls.read()
+            autoText = listOfNotNull(
+                if (controls.autoExposureSupported) "Auto exposure: ${if (controls.autoExposure) "ON" else "OFF"}" else null,
+                if (controls.autoWhiteBalanceSupported) "Auto WB: ${if (controls.autoWhiteBalance) "ON" else "OFF"}" else null,
+            ).joinToString(" · ")
+            panel = ControlsPanel(this, store)
             runOnUiThread {
                 if (videoMode == null) {
                     setStatus("Kamera tidak punya mode MJPEG")
@@ -271,6 +286,8 @@ class MainActivity : Activity() {
     }
 
     private fun close() {
+        panel?.dismiss()
+        panel = null
         live.set(false)
         recording.set(false)
         setButtons(false)
@@ -464,12 +481,14 @@ class MainActivity : Activity() {
         if (!c.sameRatio(p)) {
             lines += "⚠ Kamera tidak punya mode serasio ${c.imageWidth}x${c.imageHeight} — parameter mungkin salah, geometri foto tidak akan cocok."
         }
+        if (autoText.isNotEmpty()) lines += autoText
         info.text = lines.joinToString("\n")
     }
 
     private fun setButtons(enabled: Boolean) {
         photoButton.isEnabled = enabled
         recordButton.isEnabled = enabled
+        adjustButton.isEnabled = enabled
         if (!enabled) recordButton.text = "Rekam"
     }
 
