@@ -35,15 +35,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val ACTION_USB_PERMISSION = "id.aranus.fisheyecapture.USB_PERMISSION"
-private const val ALBUM = "FisheyeCapture"
+private const val ALBUM = "MoilCapture"
 private const val PREFS = "fisheye"
 private const val PREF_PARAM = "parameter"
 private const val PREF_REC_FPS = "recordFps"
 private const val REQ_CAMERA = 1
 
-/** Frame awal dibuang supaya auto-exposure kamera sempat menyesuaikan. */
-private const val WARMUP_FRAMES = 4
-private const val CAPTURE_DEADLINE_MS = 6000L
+/** Batas tunggu auto-exposure stabil setelah pindah ke mode foto. */
+private const val SETTLE_DEADLINE_MS = 10_000L
 private const val PREVIEW_INTERVAL_MS = 100L
 
 /**
@@ -192,7 +191,7 @@ class MainActivity : Activity() {
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
-            setStatus("Izin Kamera diperlukan untuk kamera USB. Aktifkan di Setelan ▸ Aplikasi ▸ Fisheye Capture ▸ Izin.")
+            setStatus("Izin Kamera diperlukan untuk kamera USB. Aktifkan di Setelan ▸ Aplikasi ▸ Moil Capture ▸ Izin.")
         }
     }
 
@@ -373,10 +372,17 @@ class MainActivity : Activity() {
                 val opts = BitmapFactory.Options().apply { inSampleSize = sampleFor(mode.width, 1080) }
                 var lastWrite = 0L
                 var lastPreview = 0L
-                var warmup = 2 // frame pertama setelah ganti mode: biarkan exposure menyesuaikan
+                // Frame awal setelah ganti mode putih/terlalu terang: tunggu AE stabil dulu.
+                val settle = ExposureSettle()
+                val settleUntil = SystemClock.elapsedRealtime() + SETTLE_DEADLINE_MS
+                var settled = false
+                runOnUiThread { setStatus("Menunggu exposure stabil…") }
                 while (recording.get()) {
                     val jpeg = UvcNative.grabFrame(1500) ?: continue
-                    if (warmup-- > 0) continue
+                    if (!settled) {
+                        settled = settle.offer(jpeg) || SystemClock.elapsedRealtime() > settleUntil
+                        if (!settled) continue
+                    }
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastWrite >= interval) {
                         lastWrite = now
@@ -453,7 +459,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Buat file AVI di Movies/FisheyeCapture (ditulis langsung lewat MediaStore). */
+    /** Buat file AVI di Movies/MoilCapture (ditulis langsung lewat MediaStore). */
     private fun newRecording(mode: CaptureMode, fps: Int): Recording {
         val name = fileName("avi", mode.width, mode.height)
         val values = ContentValues().apply {
@@ -492,14 +498,16 @@ class MainActivity : Activity() {
         if (active.isEmpty()) error("kamera menolak mode ${mode.width}x${mode.height}")
         var jpeg: ByteArray? = null
         try {
-            val deadline = SystemClock.elapsedRealtime() + CAPTURE_DEADLINE_MS
-            var valid = 0
-            while (SystemClock.elapsedRealtime() < deadline && valid <= WARMUP_FRAMES) {
-                // Simpan frame valid terakhir: di USB isochronous Android, frame resolusi
-                // tinggi kadang rusak/nol setelah beberapa frame — yang valid tetap dipakai.
+            // Tunggu AE stabil (frame awal setelah ganti mode putih/terlalu terang).
+            // Bila batas waktu habis, pakai frame valid terakhir: di USB isochronous
+            // Android frame resolusi tinggi kadang rusak — yang valid tetap dipakai.
+            val deadline = SystemClock.elapsedRealtime() + SETTLE_DEADLINE_MS
+            val settle = ExposureSettle()
+            runOnUiThread { setStatus("Menunggu exposure stabil…") }
+            while (SystemClock.elapsedRealtime() < deadline) {
                 val f = UvcNative.grabFrame(1500) ?: continue
                 jpeg = f
-                valid++
+                if (settle.offer(f)) break
             }
         } finally {
             UvcNative.stopStream()
