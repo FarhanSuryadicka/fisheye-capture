@@ -38,6 +38,7 @@ private const val ACTION_USB_PERMISSION = "id.aranus.fisheyecapture.USB_PERMISSI
 private const val ALBUM = "FisheyeCapture"
 private const val PREFS = "fisheye"
 private const val PREF_PARAM = "parameter"
+private const val PREF_REC_FPS = "recordFps"
 private const val REQ_CAMERA = 1
 
 /** Frame awal dibuang supaya auto-exposure kamera sempat menyesuaikan. */
@@ -60,6 +61,7 @@ class MainActivity : Activity() {
     private lateinit var recordButton: Button
     private lateinit var paramButton: Button
     private lateinit var adjustButton: Button
+    private lateinit var rateButton: Button
     private var panel: ControlsPanel? = null
     /** Status auto exposure / white balance kamera, untuk ditampilkan di info. */
     private var autoText = ""
@@ -108,6 +110,9 @@ class MainActivity : Activity() {
         paramButton = findViewById(R.id.parameter)
         adjustButton = findViewById(R.id.adjust)
         adjustButton.setOnClickListener { panel?.show() }
+        rateButton = findViewById(R.id.rate)
+        rateButton.setOnClickListener { cycleRecordFps() }
+        showRate()
         startButton = findViewById(R.id.start)
         setupParameterPicker()
         startButton.setOnClickListener { if (started) stopCamera() else startCamera() }
@@ -304,9 +309,10 @@ class MainActivity : Activity() {
      * Satu loop untuk live view dan rekaman: stream di mode video, tampilkan
      * frame ~10 fps, dan selama [recording] tulis setiap frame asli ke AVI.
      */
+    /** Live view di mode video (sama dengan MoilMeet), hanya untuk membidik. */
     private fun startLive() {
         val mode = videoMode ?: return
-        if (!live.compareAndSet(false, true)) return
+        if (connection == null || !live.compareAndSet(false, true)) return
         setButtons(true)
         setStatus("Live ${mode.width}x${mode.height}. Siap ambil foto / rekam.")
         camera.execute {
@@ -316,67 +322,120 @@ class MainActivity : Activity() {
                 return@execute
             }
             val opts = BitmapFactory.Options().apply { inSampleSize = sampleFor(mode.width, 1080) }
-            var recorder: Recording? = null
             var lastPreview = 0L
             try {
                 while (live.get()) {
-                    if (recording.get() && recorder == null) {
-                        recorder = runCatching { newRecording(mode) }
-                            .onFailure { e -> recording.set(false); runOnUiThread { setStatus("Gagal rekam: ${e.message}") } }
-                            .getOrNull()
-                    }
-                    if (!recording.get() && recorder != null) {
-                        val r = recorder
-                        recorder = null
-                        finishRecording(r)
-                    }
                     val jpeg = UvcNative.grabFrame(500) ?: continue
-                    recorder?.let { r ->
-                        r.writer.write(jpeg)
-                        if (r.writer.bytesWritten > AviMjpegWriter.MAX_BYTES) recording.set(false)
-                    }
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastPreview >= PREVIEW_INTERVAL_MS) {
-                        lastPreview = now
-                        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts) ?: continue
-                        val rec = recorder
-                        runOnUiThread {
-                            if (live.get()) preview.setImageBitmap(bmp)
-                            if (rec != null) setStatus("● REC ${rec.elapsedText()} · ${rec.writer.frames} frame · ${rec.writer.bytesWritten / 1_048_576} MB")
-                        }
-                    }
+                    if (now - lastPreview < PREVIEW_INTERVAL_MS) continue
+                    lastPreview = now
+                    val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts) ?: continue
+                    runOnUiThread { if (live.get()) preview.setImageBitmap(bmp) }
                 }
             } finally {
-                recorder?.let { finishRecording(it) }
                 UvcNative.stopStream()
             }
         }
     }
 
     private fun startRecording() {
+        val mode = photoMode ?: return
         if (!live.get()) return
         recording.set(true)
+        live.set(false) // loop live berhenti + stopStream() sebelum sesi rekam jalan
         photoButton.isEnabled = false
+        rateButton.isEnabled = false
+        adjustButton.isEnabled = false
         recordButton.text = "Stop Rekam"
+        val fps = recordFps
+        camera.execute { recordSession(mode, fps) }
     }
 
     private fun stopRecording() {
         recording.set(false)
     }
 
-    /** Jalan di thread kamera. */
-    private fun finishRecording(r: Recording) {
-        val result = runCatching { r.finish(contentResolver) }
+    /**
+     * Rekam di resolusi FOTO (bukan mode live): tiap frame = JPEG asli kamera,
+     * jadi frame hasil ekstraksi video sama kualitasnya dengan tombol Foto.
+     * Ukuran file diatur lewat fps rekam, bukan resolusi. Jalan di thread kamera.
+     */
+    private fun recordSession(mode: CaptureMode, fps: Int) {
+        var rec: Recording? = null
+        val result = runCatching {
+            if (UvcNative.startStream(mode.width, mode.height, mode.fps).isEmpty()) {
+                error("kamera menolak mode ${mode.width}x${mode.height}")
+            }
+            try {
+                val r = newRecording(mode, fps)
+                rec = r
+                val interval = if (fps > 0) 1000L / fps else 0L
+                val opts = BitmapFactory.Options().apply { inSampleSize = sampleFor(mode.width, 1080) }
+                var lastWrite = 0L
+                var lastPreview = 0L
+                var warmup = 2 // frame pertama setelah ganti mode: biarkan exposure menyesuaikan
+                while (recording.get()) {
+                    val jpeg = UvcNative.grabFrame(1500) ?: continue
+                    if (warmup-- > 0) continue
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastWrite >= interval) {
+                        lastWrite = now
+                        r.write(jpeg)
+                        if (r.limitReached) recording.set(false)
+                    }
+                    if (now - lastPreview >= 500) {
+                        lastPreview = now
+                        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
+                        runOnUiThread {
+                            if (bmp != null) preview.setImageBitmap(bmp)
+                            setStatus("● REC ${mode.width}x${mode.height} · ${fpsLabel(fps)} · ${r.elapsedText()} · ${r.frames} frame · ${r.bytes / 1_048_576} MB")
+                        }
+                    }
+                }
+            } finally {
+                UvcNative.stopStream()
+            }
+            rec!!.finish(contentResolver)
+        }
+        recording.set(false)
         runOnUiThread {
             recordButton.text = "Rekam"
-            photoButton.isEnabled = live.get()
-            result.onSuccess { setStatus("Video tersimpan: Movies/$ALBUM/${r.name} (${r.writer.frames} frame)") }
-                .onFailure { setStatus("Gagal menyimpan video: ${it.message}") }
+            val r = rec
+            result.onSuccess { setStatus("Video tersimpan: Movies/$ALBUM/${r?.name} (${r?.frames} frame, ${(r?.bytes ?: 0) / 1_048_576} MB)") }
+                .onFailure { setStatus("Gagal rekam: ${it.message}") }
+            startLive()
         }
     }
 
-    private inner class Recording(val name: String, val uri: Uri, val writer: AviMjpegWriter) {
+    // ---------------- FPS rekam ----------------
+
+    /** Pilihan fps rekam; 0 = semampu kamera. */
+    private val fpsChoices = intArrayOf(1, 2, 5, 0)
+    private val recordFps: Int
+        get() = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_REC_FPS, 1)
+
+    private fun fpsLabel(fps: Int) = if (fps > 0) "$fps fps" else "fps maks"
+
+    private fun cycleRecordFps() {
+        val cur = fpsChoices.indexOf(recordFps).coerceAtLeast(0)
+        val next = fpsChoices[(cur + 1) % fpsChoices.size]
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(PREF_REC_FPS, next).apply()
+        showRate()
+    }
+
+    private fun showRate() {
+        rateButton.text = fpsLabel(recordFps)
+    }
+
+    /** Satu sesi rekam: AVI MJPEG berisi frame JPEG asli kamera. */
+    private inner class Recording(val name: String, val uri: Uri, private val avi: AviMjpegWriter) {
         private val startedAt = SystemClock.elapsedRealtime()
+
+        val frames: Int get() = avi.frames
+        val bytes: Long get() = avi.bytesWritten
+        val limitReached: Boolean get() = avi.bytesWritten > AviMjpegWriter.MAX_BYTES
+
+        fun write(jpeg: ByteArray) = avi.write(jpeg)
 
         fun elapsedText(): String {
             val s = (SystemClock.elapsedRealtime() - startedAt) / 1000
@@ -385,13 +444,17 @@ class MainActivity : Activity() {
 
         fun finish(resolver: android.content.ContentResolver) {
             val secs = (SystemClock.elapsedRealtime() - startedAt) / 1000.0
-            writer.finish(if (secs > 0) writer.frames / secs else 0.0)
+            avi.finish(if (secs > 0) avi.frames / secs else 0.0)
+            if (avi.frames == 0) {
+                resolver.delete(uri, null, null)
+                error("tidak ada frame terekam")
+            }
             resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
         }
     }
 
     /** Buat file AVI di Movies/FisheyeCapture (ditulis langsung lewat MediaStore). */
-    private fun newRecording(mode: CaptureMode): Recording {
+    private fun newRecording(mode: CaptureMode, fps: Int): Recording {
         val name = fileName("avi", mode.width, mode.height)
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
@@ -402,7 +465,8 @@ class MainActivity : Activity() {
         val uri = contentResolver.insert(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
             ?: error("galeri tidak bisa ditulis")
         val pfd = contentResolver.openFileDescriptor(uri, "rw") ?: error("galeri tidak bisa ditulis")
-        return Recording(name, uri, AviMjpegWriter(FileOutputStream(pfd.fileDescriptor), mode.width, mode.height, mode.fps, pfd))
+        val nominal = if (fps > 0) fps else mode.fps
+        return Recording(name, uri, AviMjpegWriter(FileOutputStream(pfd.fileDescriptor), mode.width, mode.height, nominal, pfd))
     }
 
     // ---------------- Foto ----------------
@@ -489,6 +553,7 @@ class MainActivity : Activity() {
         photoButton.isEnabled = enabled
         recordButton.isEnabled = enabled
         adjustButton.isEnabled = enabled
+        rateButton.isEnabled = enabled
         if (!enabled) recordButton.text = "Rekam"
     }
 
